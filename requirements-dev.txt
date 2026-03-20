@@ -1,0 +1,19 @@
+# Dev / CI dependencies (production image'a GİRMEZ)
+-r requirements.txt
+
+# Linting & formatting
+flake8>=7.0.0
+black>=24.0.0
+isort>=5.13.0
+mypy>=1.8.0
+
+# Security
+bandit>=1.7.0
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.12.0
+
+# Type stubs
+boto3-stubs[sagemaker,s3,ssm]>=1.34.0

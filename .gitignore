@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc, *.pyo, *.pyd
+.Python, *.egg-info/
+ 
+# Virtual environments
+.env, .venv/, venv/, env/
+ 
+# Testing
+.pytest_cache/, .coverage
+coverage.xml, htmlcov/
+ 
+# AWS / Secrets — asla commit'leme
+.env.local, .env.production
+*.pem, *.key
+aws-credentials*
+ 
+# Model artifacts — S3'te sakla
+*.pkl, *.joblib, *.h5
+*.pt, *.onnx
+models/

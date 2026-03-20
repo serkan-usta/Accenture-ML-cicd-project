@@ -1,0 +1,282 @@
+name: ML CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Aynı branch'te yeni push gelirse eski run'ı iptal et
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ml-model
+  PYTHON_VERSION: "3.11"
+
+# En az yetkiyle çalış (least privilege)
+permissions:
+  contents: read
+  id-token: write   # OIDC için gerekli
+  pull-requests: write
+
+jobs:
+  # ─────────────────────────────────────────
+  # STAGE 1: Lint & Test
+  # ─────────────────────────────────────────
+  lint-and-test:
+    name: 🔍 Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # Sonsuz beklemeyi önle
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"  # setup-python'un yerleşik cache'i (actions/cache'ten daha hızlı)
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint with flake8
+        run: flake8 src/ tests/ --max-line-length=120 --statistics
+
+      - name: Check formatting with black
+        run: black --check src/ tests/
+
+      - name: Check import order with isort
+        run: isort --check-only src/ tests/
+
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        # FIX: Tip güvenliği — orijinalde yoktu, production'da kritik
+
+      - name: Security scan with bandit
+        run: bandit -r src/ -ll
+        # FIX: Güvenlik açığı taraması — orijinalde yoktu
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -v
+        # FIX: --cov-fail-under eklendi — minimum %70 coverage zorunlu
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+
+      # PR'larda coverage özeti yorum olarak ekle
+      - name: Coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: py-actions/py-coverage-comment@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COVERAGE_XML: coverage.xml
+
+  # ─────────────────────────────────────────
+  # STAGE 2: Docker Build & Push to ECR
+  # ─────────────────────────────────────────
+  docker-build-push:
+    name: 🐳 Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 20
+
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
+      image_tag: ${{ steps.build.outputs.image_tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # FIX: Access key yerine OIDC kullan — key rotation riski yok
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+        # NOT: AWS konsolunda GitHub OIDC provider eklenmeli
+        # Fallback: access key yöntemi için aşağıyı uncomment et
+        # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # FIX: Docker layer cache — build süresi %50-70 azalır
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build, tag, and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # FIX: Build args ile metadata gömülür — image içinden versiyon sorgulanabilir
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+
+      # FIX: Image güvenlik taraması — CVE'leri deploy öncesi yakala
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+
+      - name: Set outputs
+        id: set-outputs
+        run: |
+          echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────
+  # STAGE 3: Deploy to AWS (SageMaker)
+  # ─────────────────────────────────────────
+  deploy-aws:
+    name: 🚀 Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+    # FIX: Environment koruma kuralları — manual approval eklenebilir
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install deploy dependencies
+        run: pip install sagemaker boto3
+
+      - name: Deploy SageMaker Endpoint
+        env:
+          IMAGE_URI: ${{ needs.docker-build-push.outputs.image_uri }}
+        run: |
+          python scripts/deploy_sagemaker.py \
+            --image-uri "$IMAGE_URI" \
+            --role-arn "${{ secrets.SAGEMAKER_ROLE_ARN }}" \
+            --endpoint-name ml-model-endpoint \
+            --region "${{ env.AWS_REGION }}" \
+            --wait
+        # FIX: --wait eklendi — deploy tamamlanmadan sonraki stage başlamaz
+
+      # FIX: Smoke test — endpoint gerçekten canlı mı?
+      - name: Smoke test endpoint
+        run: |
+          python scripts/smoke_test.py \
+            --endpoint-name ml-model-endpoint \
+            --region "${{ env.AWS_REGION }}"
+
+  # ─────────────────────────────────────────
+  # STAGE 4: Trigger SageMaker Pipeline
+  # ─────────────────────────────────────────
+  trigger-sagemaker-pipeline:
+    name: ⚙️ Trigger SageMaker Pipeline
+    runs-on: ubuntu-latest
+    needs: deploy-aws
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install boto3 sagemaker
+
+      - name: Trigger SageMaker ML Pipeline
+        run: |
+          python scripts/trigger_pipeline.py \
+            --pipeline-name ml-training-pipeline \
+            --region "${{ env.AWS_REGION }}" \
+            --commit-sha "${{ github.sha }}" \
+            --triggered-by "${{ github.actor }}"
+        # FIX: --triggered-by eklendi — kim tetikledi bilgisi lineage'a yazılır
+
+  # ─────────────────────────────────────────
+  # STAGE 5: Notify (yeni)
+  # ─────────────────────────────────────────
+  notify:
+    name: 📣 Notify
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, docker-build-push, deploy-aws, trigger-sagemaker-pipeline]
+    if: always() && github.ref == 'refs/heads/main'
+    # FIX: Pipeline sonucu Slack'e bildirim — orijinalde yoktu
+
+    steps:
+      - name: Notify Slack on success
+        if: ${{ !contains(needs.*.result, 'failure') }}
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ ML Pipeline başarılı — commit: ${{ github.sha }} by ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Notify Slack on failure
+        if: ${{ contains(needs.*.result, 'failure') }}
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "❌ ML Pipeline FAILED — commit: ${{ github.sha }} by ${{ github.actor }} — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
