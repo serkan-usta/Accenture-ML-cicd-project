@@ -161,7 +161,6 @@ This directly implements the whitepaper's lineage requirement:
 
 ## References
 
-- [Accenture Enterprise AI – Scaling ML and Deep Learning Models (AWS Whitepaper)](https://docs.aws.amazon.com/whitepapers/latest/accenture-ai-scaling-ml-and-deep-learning-models/machine-learning-pipelines.html)
 - [Amazon SageMaker Lineage Tracking](https://docs.aws.amazon.com/sagemaker/latest/dg/lineage-tracking.html)
 - [GitHub Actions OIDC with AWS](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
 - [Trivy vulnerability scanner](https://github.com/aquasecurity/trivy-action)
