@@ -1,20 +1,19 @@
 """
 deploy_sagemaker.py
-SageMaker real-time endpoint deploy/update — production grade.
+Deploys a Docker image to a SageMaker real-time endpoint. Production grade.
 
-Geliştirmeler (orijinale göre):
-- --wait flag: deploy tamamlanana kadar bekler
-- Retry logic: geçici AWS hatalarına karşı
-- Data capture: gerçek trafiği S3'e yazar (model monitoring için)
-- Auto-scaling policy: endpoint yük altında otomatik scale eder
-- Waiter timeout: 30 dk sonra hata fırlatır
-- Structured logging: CloudWatch ile uyumlu JSON log
+Improvements over v1:
+    wait flag: blocks until deploy is fully complete
+    Retry logic: handles transient AWS errors
+    Data capture: writes live traffic to S3 for model monitoring
+    Auto-scaling policy: endpoint scales automatically under load
+    Waiter timeout: raises after 30 minutes
+    Structured logging: JSON format compatible with CloudWatch
 """
 
 import argparse
 import json
 import logging
-import sys
 import time
 from datetime import datetime
 
@@ -23,7 +22,7 @@ import sagemaker
 from botocore.exceptions import ClientError, WaiterError
 from sagemaker.model import Model
 
-# FIX: JSON formatında structured logging — CloudWatch'ta filtrelenebilir
+# FIX: Structured JSON logging, filterable in CloudWatch
 logging.basicConfig(
     level=logging.INFO,
     format='{"time": "%(asctime)s", "level": "%(levelname)s", "msg": "%(message)s"}',
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 INSTANCE_TYPE = "ml.m5.xlarge"
 MAX_RETRIES = 3
-RETRY_DELAY = 10  # saniye
+RETRY_DELAY = 10  # seconds
 
 
 def deploy(
@@ -48,7 +47,7 @@ def deploy(
 
     logger.info(f"Starting deploy: endpoint={endpoint_name} image={image_uri}")
 
-    # FIX: Model adına timestamp ekle — aynı isimde model çakışmasını önler
+    # FIX: Timestamp in model name prevents collision with existing models of the same name
     model_name = f"ml-model-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
     model = Model(
@@ -60,11 +59,11 @@ def deploy(
 
     endpoint_exists = _endpoint_exists(sm_client, endpoint_name)
 
-    # FIX: Data capture config — canlı trafiği S3'e yaz (model drift tespiti için)
+    # FIX: Data capture config writes live traffic to S3 for model drift detection
     from sagemaker.model_monitor import DataCaptureConfig
     data_capture = DataCaptureConfig(
         enable_capture=True,
-        sampling_percentage=20,  # trafiğin %20'sini yakala
+        sampling_percentage=20,  # capture 20% of traffic
         destination_s3_uri=f"s3://your-ml-bucket/data-capture/{endpoint_name}",
     )
 
@@ -87,7 +86,7 @@ def deploy(
                     endpoint_name=endpoint_name,
                     data_capture_config=data_capture,
                 )
-            break  # başarılı — döngüden çık
+            break  # success, exit retry loop
 
         except ClientError as e:
             code = e.response["Error"]["Code"]
@@ -105,7 +104,7 @@ def deploy(
 
 
 def _endpoint_exists(sm_client, endpoint_name: str) -> bool:
-    """Endpoint var mı kontrol et."""
+    """Check whether the endpoint already exists."""
     try:
         sm_client.describe_endpoint(EndpointName=endpoint_name)
         return True
@@ -117,8 +116,8 @@ def _endpoint_exists(sm_client, endpoint_name: str) -> bool:
 
 def _wait_for_endpoint(sm_client, endpoint_name: str, timeout: int = 1800):
     """
-    FIX: Endpoint InService olana kadar bekle.
-    Orijinalde wait yoktu — deploy başlar ama tamamlandı mı bilinmezdi.
+    FIX: Block until endpoint reaches InService status.
+    In v1 there was no wait. The deploy request was sent but completion was unknown.
     """
     logger.info(f"Waiting for endpoint to be InService (max {timeout}s)...")
     waiter = sm_client.get_waiter("endpoint_in_service")
@@ -135,8 +134,8 @@ def _wait_for_endpoint(sm_client, endpoint_name: str, timeout: int = 1800):
 
 def _setup_autoscaling(session, endpoint_name: str):
     """
-    FIX: Auto-scaling policy — orijinalde yoktu.
-    Yük altında instance sayısı 1'den 4'e otomatik çıkar.
+    FIX: Auto-scaling policy, was missing in v1.
+    Instance count scales automatically from 1 to 4 under load.
     """
     aas_client = session.client("application-autoscaling")
     resource_id = f"endpoint/{endpoint_name}/variant/AllTraffic"
@@ -156,7 +155,7 @@ def _setup_autoscaling(session, endpoint_name: str):
             ScalableDimension="sagemaker:variant:DesiredInstanceCount",
             PolicyType="TargetTrackingScaling",
             TargetTrackingScalingPolicyConfiguration={
-                "TargetValue": 70.0,  # %70 CPU kullanımında scale out
+                "TargetValue": 70.0,  # scale out at 70% CPU utilisation
                 "PredefinedMetricSpecification": {
                     "PredefinedMetricType": "SageMakerVariantInvocationsPerInstance",
                 },

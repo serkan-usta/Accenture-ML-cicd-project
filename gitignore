@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.env
+.venv/
+venv/
+env/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE
+.DS_Store
+.vscode/settings.json
+.idea/
+*.swp
+
+# AWS and secrets, never commit these
+.env.local
+.env.production
+*.pem
+*.key
+aws-credentials*
+
+# Model artifacts, store in S3 not in the repo
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
+models/
+
+# Logs
+*.log
+logs/

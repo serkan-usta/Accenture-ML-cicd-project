@@ -1,7 +1,7 @@
-# Dev / CI dependencies (production image'a GİRMEZ)
+# Dev and CI dependencies (NOT included in the production image)
 -r requirements.txt
 
-# Linting & formatting
+# Linting and formatting
 flake8>=7.0.0
 black>=24.0.0
 isort>=5.13.0

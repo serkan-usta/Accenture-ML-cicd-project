@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main]
 
-# Aynı branch'te yeni push gelirse eski run'ı iptal et
+# Cancel previous run on the same branch when a new push arrives
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -16,20 +16,17 @@ env:
   ECR_REPOSITORY: ml-model
   PYTHON_VERSION: "3.11"
 
-# En az yetkiyle çalış (least privilege)
+# Least privilege permissions
 permissions:
   contents: read
-  id-token: write   # OIDC için gerekli
+  id-token: write   # Required for OIDC
   pull-requests: write
 
 jobs:
-  # ─────────────────────────────────────────
-  # STAGE 1: Lint & Test
-  # ─────────────────────────────────────────
   lint-and-test:
-    name: 🔍 Lint & Test
+    name: Lint and Test
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Sonsuz beklemeyi önle
+    timeout-minutes: 15  # Prevent infinite waits
 
     steps:
       - name: Checkout code
@@ -39,7 +36,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"  # setup-python'un yerleşik cache'i (actions/cache'ten daha hızlı)
+          cache: "pip"  # Built-in cache from setup-python (faster than actions/cache)
 
       - name: Install dev dependencies
         run: |
@@ -58,11 +55,11 @@ jobs:
 
       - name: Type check with mypy
         run: mypy src/ --ignore-missing-imports
-        # FIX: Tip güvenliği — orijinalde yoktu, production'da kritik
+        # FIX: Type safety added, was missing in v1, critical in production
 
       - name: Security scan with bandit
         run: bandit -r src/ -ll
-        # FIX: Güvenlik açığı taraması — orijinalde yoktu
+        # FIX: Security vulnerability scan, was missing in v1
 
       - name: Run unit tests with coverage
         run: |
@@ -72,7 +69,7 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=70 \
             -v
-        # FIX: --cov-fail-under eklendi — minimum %70 coverage zorunlu
+        # FIX: Added --cov-fail-under, minimum 70% coverage required
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -80,7 +77,6 @@ jobs:
           file: coverage.xml
           fail_ci_if_error: false
 
-      # PR'larda coverage özeti yorum olarak ekle
       - name: Coverage comment on PR
         if: github.event_name == 'pull_request'
         uses: py-actions/py-coverage-comment@v1
@@ -88,32 +84,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COVERAGE_XML: coverage.xml
 
-  # ─────────────────────────────────────────
-  # STAGE 2: Docker Build & Push to ECR
-  # ─────────────────────────────────────────
   docker-build-push:
-    name: 🐳 Docker Build & Push
+    name: Docker Build and Push
     runs-on: ubuntu-latest
     needs: lint-and-test
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 20
 
     outputs:
-      image_uri: ${{ steps.build.outputs.image_uri }}
-      image_tag: ${{ steps.build.outputs.image_tag }}
+      image_uri: ${{ steps.set-outputs.outputs.image_uri }}
+      image_tag: ${{ steps.set-outputs.outputs.image_tag }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # FIX: Access key yerine OIDC kullan — key rotation riski yok
-      - name: Configure AWS credentials (OIDC)
+      # FIX: OIDC instead of access keys, no key rotation risk
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-        # NOT: AWS konsolunda GitHub OIDC provider eklenmeli
-        # Fallback: access key yöntemi için aşağıyı uncomment et
+        # NOTE: GitHub OIDC provider must be added in the AWS console
+        # Fallback: uncomment below to use access keys
         # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -121,7 +114,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # FIX: Docker layer cache — build süresi %50-70 azalır
+      # FIX: Docker layer cache reduces build time by 50-70%
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -137,14 +130,14 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # FIX: Build args ile metadata gömülür — image içinden versiyon sorgulanabilir
+          # FIX: Build args embed metadata, version is queryable from inside the image
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             GIT_SHA=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}
 
-      # FIX: Image güvenlik taraması — CVE'leri deploy öncesi yakala
-      - name: Scan image for vulnerabilities (Trivy)
+      # FIX: Image security scan, catches CVEs before deploy
+      - name: Scan image for vulnerabilities via Trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
@@ -158,23 +151,20 @@ jobs:
           echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
-  # ─────────────────────────────────────────
-  # STAGE 3: Deploy to AWS (SageMaker)
-  # ─────────────────────────────────────────
   deploy-aws:
-    name: 🚀 Deploy to AWS
+    name: Deploy to AWS
     runs-on: ubuntu-latest
     needs: docker-build-push
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 30
-    # FIX: Environment koruma kuralları — manual approval eklenebilir
+    # FIX: Environment protection rules allow adding a manual approval gate
     environment: production
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
@@ -199,20 +189,17 @@ jobs:
             --endpoint-name ml-model-endpoint \
             --region "${{ env.AWS_REGION }}" \
             --wait
-        # FIX: --wait eklendi — deploy tamamlanmadan sonraki stage başlamaz
+        # FIX: Added --wait, next stage does not start until deploy is complete
 
-      # FIX: Smoke test — endpoint gerçekten canlı mı?
+      # FIX: Smoke test verifies the endpoint is actually live
       - name: Smoke test endpoint
         run: |
           python scripts/smoke_test.py \
             --endpoint-name ml-model-endpoint \
             --region "${{ env.AWS_REGION }}"
 
-  # ─────────────────────────────────────────
-  # STAGE 4: Trigger SageMaker Pipeline
-  # ─────────────────────────────────────────
   trigger-sagemaker-pipeline:
-    name: ⚙️ Trigger SageMaker Pipeline
+    name: Trigger SageMaker Pipeline
     runs-on: ubuntu-latest
     needs: deploy-aws
     if: github.ref == 'refs/heads/main'
@@ -222,7 +209,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
@@ -244,17 +231,14 @@ jobs:
             --region "${{ env.AWS_REGION }}" \
             --commit-sha "${{ github.sha }}" \
             --triggered-by "${{ github.actor }}"
-        # FIX: --triggered-by eklendi — kim tetikledi bilgisi lineage'a yazılır
+        # FIX: Added --triggered-by, actor is written to lineage record
 
-  # ─────────────────────────────────────────
-  # STAGE 5: Notify (yeni)
-  # ─────────────────────────────────────────
   notify:
-    name: 📣 Notify
+    name: Notify
     runs-on: ubuntu-latest
     needs: [lint-and-test, docker-build-push, deploy-aws, trigger-sagemaker-pipeline]
     if: always() && github.ref == 'refs/heads/main'
-    # FIX: Pipeline sonucu Slack'e bildirim — orijinalde yoktu
+    # FIX: Slack notification on pipeline result, was missing in v1
 
     steps:
       - name: Notify Slack on success
@@ -263,7 +247,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "✅ ML Pipeline başarılı — commit: ${{ github.sha }} by ${{ github.actor }}"
+              "text": "ML Pipeline succeeded. commit: ${{ github.sha }} by ${{ github.actor }}"
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -275,7 +259,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "❌ ML Pipeline FAILED — commit: ${{ github.sha }} by ${{ github.actor }} — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "text": "ML Pipeline FAILED. commit: ${{ github.sha }} by ${{ github.actor }}. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

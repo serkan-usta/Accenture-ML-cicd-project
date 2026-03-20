@@ -26,4 +26,4 @@ show_missing = true
 
 [tool.bandit]
 targets = ["src"]
-skips = ["B101"]  # assert kullanımı test'lerde normal
+skips = ["B101"]  # assert usage is normal in tests

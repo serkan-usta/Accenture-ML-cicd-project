@@ -1,13 +1,13 @@
 """
 trigger_pipeline.py
-SageMaker ML Pipeline tetikleyici — production grade.
+Triggers a SageMaker ML Pipeline execution. Production grade.
 
-Geliştirmeler (orijinale göre):
-- --triggered-by: kim başlattı bilgisi
-- Duplicate execution guard: aynı commit için çift çalışmayı önler
-- Execution URL: direkt SageMaker console linki log'a yazılır
-- SSM yerine SageMaker Tags: lineage native SageMaker'da tutulur
-- Structured JSON logging
+Improvements over v1:
+    triggered_by: records who initiated the execution
+    Duplicate execution guard: prevents double-running for the same commit
+    Execution URL: direct SageMaker console link written to logs
+    SageMaker Tags instead of SSM: lineage stays native to SageMaker
+    Structured JSON logging
 """
 
 import argparse
@@ -33,7 +33,7 @@ def trigger_pipeline(
 ):
     sm_client = boto3.client("sagemaker", region_name=region)
 
-    # FIX: Duplicate execution guard — aynı commit SHA için zaten çalışan var mı?
+    # FIX: Duplicate execution guard. Check whether this commit is already running.
     if _is_already_running(sm_client, pipeline_name, commit_sha):
         logger.warning(
             f"Pipeline execution for commit {commit_sha} already running. Skipping."
@@ -41,12 +41,12 @@ def trigger_pipeline(
         return None
 
     pipeline_params = [
-        {"Name": "CommitSha",            "Value": commit_sha},
-        {"Name": "ExecutionDate",        "Value": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
-        # FIX: utcnow() deprecated Python 3.12+ — timezone-aware kullan
-        {"Name": "ModelApprovalStatus",  "Value": "PendingManualApproval"},
-        {"Name": "TriggeredBy",          "Value": triggered_by},
-        # FIX: Kim tetikledi bilgisi pipeline içinden de erişilebilir
+        {"Name": "CommitSha",           "Value": commit_sha},
+        {"Name": "ExecutionDate",       "Value": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
+        # FIX: timezone-aware datetime, utcnow() is deprecated in Python 3.12+
+        {"Name": "ModelApprovalStatus", "Value": "PendingManualApproval"},
+        {"Name": "TriggeredBy",         "Value": triggered_by},
+        # FIX: Who triggered the execution is accessible as a pipeline parameter
     ]
 
     logger.info(f"Triggering pipeline: {pipeline_name} commit={commit_sha[:8]} by={triggered_by}")
@@ -60,7 +60,7 @@ def trigger_pipeline(
 
     execution_arn = response["PipelineExecutionArn"]
 
-    # FIX: Execution URL'i log'a yaz — konsolda direkt tıkla
+    # FIX: Write clickable console URL to logs, no need to search manually
     execution_id = execution_arn.split("/")[-1]
     console_url = (
         f"https://{region}.console.aws.amazon.com/sagemaker/home"
@@ -69,18 +69,18 @@ def trigger_pipeline(
     logger.info(f"Pipeline execution started: {execution_arn}")
     logger.info(f"Console URL: {console_url}")
 
-    # FIX: Lineage'ı SSM yerine SageMaker Tags ile tut
-    #      SSM'e yazmak ayrı IAM permission gerektiriyor, tags daha temiz
+    # FIX: Use SageMaker Tags instead of SSM for lineage
+    #      Writing to SSM requires a separate IAM permission, tags are cleaner
     _tag_execution(sm_client, execution_arn, commit_sha, triggered_by)
 
-    # FIX: SSM'e de yaz (isteğe bağlı, eski sistemlerle uyumluluk için)
+    # FIX: Also write to SSM for backward compatibility with existing tooling
     _record_to_ssm(region, pipeline_name, execution_arn, commit_sha, triggered_by)
 
     return execution_arn
 
 
 def _is_already_running(sm_client, pipeline_name: str, commit_sha: str) -> bool:
-    """Aynı commit için zaten çalışan execution var mı?"""
+    """Check whether an execution for this commit SHA is already in progress."""
     try:
         paginator = sm_client.get_paginator("list_pipeline_executions")
         for page in paginator.paginate(PipelineName=pipeline_name):
@@ -91,20 +91,20 @@ def _is_already_running(sm_client, pipeline_name: str, commit_sha: str) -> bool:
                 ):
                     return True
     except ClientError:
-        pass  # pipeline henüz yoksa sorun değil
+        pass  # pipeline does not exist yet, not an error
     return False
 
 
 def _tag_execution(sm_client, execution_arn: str, commit_sha: str, triggered_by: str):
-    """Execution'a tag ekle — native SageMaker lineage."""
+    """Tag the execution for native SageMaker lineage tracking."""
     try:
         sm_client.add_tags(
             ResourceArn=execution_arn,
             Tags=[
-                {"Key": "CommitSha",    "Value": commit_sha},
-                {"Key": "TriggeredBy",  "Value": triggered_by},
-                {"Key": "TriggeredAt",  "Value": datetime.now(timezone.utc).isoformat()},
-                {"Key": "Source",       "Value": "github-actions"},
+                {"Key": "CommitSha",   "Value": commit_sha},
+                {"Key": "TriggeredBy", "Value": triggered_by},
+                {"Key": "TriggeredAt", "Value": datetime.now(timezone.utc).isoformat()},
+                {"Key": "Source",      "Value": "github-actions"},
             ],
         )
     except ClientError as e:
@@ -118,7 +118,7 @@ def _record_to_ssm(
     commit_sha: str,
     triggered_by: str,
 ):
-    """SSM Parameter Store'a lineage kaydı yaz."""
+    """Write lineage record to SSM Parameter Store."""
     try:
         ssm = boto3.client("ssm", region_name=region)
         ssm.put_parameter(

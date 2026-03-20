@@ -1,7 +1,7 @@
 """
 smoke_test.py
-Deploy sonrası endpoint'in gerçekten canlı olduğunu doğrular.
-Orijinal projede yoktu — CI/CD'de kritik bir eksikti.
+Verifies the endpoint is genuinely live after deploy.
+This file did not exist in v1, it was a critical gap in the pipeline.
 """
 
 import argparse
@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Endpoint'in kabul etmesi beklenen minimum test payload
+# Minimal test payload the endpoint is expected to accept
 TEST_PAYLOAD = json.dumps({"inputs": [[1.0, 2.0, 3.0, 4.0]]})
 CONTENT_TYPE = "application/json"
 
