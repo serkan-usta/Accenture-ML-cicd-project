@@ -1,7 +1,7 @@
 # Accenture ML CI/CD Pipeline
 
 > Production-grade MLOps pipeline — AWS SageMaker · GitHub Actions · Docker  
-> Based on the [Accenture Enterprise AI – Scaling ML and Deep Learning Models](https://docs.aws.amazon.com/whitepapers/latest/accenture-ai-scaling-ml-and-deep-learning-models/machine-learning-pipelines.html) whitepaper.
+
 
 ---
 
