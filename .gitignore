@@ -18,4 +18,4 @@ aws-credentials*
 # Model artifacts — S3'te sakla
 *.pkl, *.joblib, *.h5
 *.pt, *.onnx
-models/
+models/.DS_Store
