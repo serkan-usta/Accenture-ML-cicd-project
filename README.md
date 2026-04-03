@@ -23,7 +23,7 @@ The pipeline is built around three principles from the whitepaper:
 
 ---
 
-## Pipeline architecture
+## Pipeline architecture 
 
 ```
 Push to main
